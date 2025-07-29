@@ -3192,6 +3192,7 @@ static int h3_finalize(void *ctx)
 	TRACE_ENTER(H3_EV_H3C_NEW, qcc->conn);
 
 	if (!qcs) {
+#if 0
 		/* RFC 9114 6.2. Unidirectional Streams
 		 *
 		 * Each endpoint needs to create at least one unidirectional stream for
@@ -3206,6 +3207,7 @@ static int h3_finalize(void *ctx)
 			qcc_report_glitch(qcc, 1);
 			goto err;
 		}
+#endif
 
 		qcs = qcc_init_stream_local(qcc, 0);
 		if (!qcs) {
