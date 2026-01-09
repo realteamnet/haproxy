@@ -1,18 +1,26 @@
-name: HAProxy v2.2.34 Debian 9 MIPS64 Build
+name: HAProxy Debian 9 MIPS64 Build
 
 on:
+  workflow_dispatch:
+    inputs:
+      haproxy_version:
+        description: 'Select HAProxy Version'
+        required: true
+        default: '2.2.34'
+        type: choice
+        options:
+          - '2.2.34'
+          - '2.4.30'
+          - '2.0.31'
   push:
     branches: [ main ]
-  pull_request:
-    branches: [ main ]
-  workflow_dispatch: 
 
 jobs:
   build-mips:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        # n64 = 64-bit | n32 = High performance 32-bit (ABI2)
+        # n64 = 64-bit | n32 = Optimized 32-bit pointers on 64-bit registers
         abi: [n64, n32]
 
     steps:
@@ -21,9 +29,9 @@ jobs:
 
       - name: Build HAProxy in Debian 9 Container
         run: |
-          # Targeting mips64el (Little Endian). 
+          # Use mips64el (Little Endian). Change to 'stretch-slim-mips64' for Big Endian.
           docker run --rm -v ${{ github.workspace }}:/output debian/stretch-slim-mips64el:latest /bin/bash -c "
-            # 1. Point to Archive Repos
+            # 1. Point to Archive Repos (Critical for Debian 9)
             echo 'deb http://archive.debian.org/debian stretch main' > /etc/apt/sources.list && \
             echo 'Acquire::Check-Valid-Until \"false\";' > /etc/apt/apt.conf.d/99no-check-valid && \
             
@@ -32,12 +40,12 @@ jobs:
             # apt-get update && apt-get install -y --force-yes build-essential git libpcre3-dev libssl-dev zlib1g-dev lua5.3 liblua5.3-dev && \
             apt-get update && apt-get install -y --force-yes build-essential git libpcre3-dev libssl-dev zlib1g-dev && \
             
-            # 3. Pull directly from official HAProxy GitHub
-            git clone --branch v2.2.34 --depth 1 https://github.com/haproxy/haproxy.git && \
+            # 3. Clone and Checkout selected version from UI
+            git clone --branch v${{ github.event.inputs.haproxy_version || '2.2.34' }} --depth 1 https://github.com/haproxy/haproxy.git && \
             cd haproxy && \
             
             # 4. Compile
-            # --- UNCOMMENT LUA LINES TO ENABLE ---
+            # --- UNCOMMENT USE_LUA LINES BELOW TO ENABLE ---
             make -j$(nproc) \
               TARGET=linux-glibc \
               CPU=generic \
@@ -49,17 +57,15 @@ jobs:
               # USE_LUA=1 \
               # LUA_LIB_NAME=lua5.3 && \
             
-            # 5. Verify Build
-            echo '--- VERIFICATION ---' && \
+            # 5. Verify and Export
+            echo '--- BINARY INFO ---' && \
             file haproxy && \
             readelf -h haproxy | grep -E 'Class|Machine|Flags' && \
-            
-            # 6. Copy to output
-            cp haproxy /output/haproxy-2.2.34-${{ matrix.abi }}
+            cp haproxy /output/haproxy-${{ github.event.inputs.haproxy_version || '2.2.34' }}-${{ matrix.abi }}
           "
 
       - name: Upload Artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: haproxy-v2.2.34-mips64-${{ matrix.abi }}
-          path: haproxy-2.2.34-${{ matrix.abi }}
+          name: haproxy-${{ github.event.inputs.haproxy_version || '2.2.34' }}-${{ matrix.abi }}
+          path: haproxy-${{ github.event.inputs.haproxy_version || '2.2.34' }}-${{ matrix.abi }}
