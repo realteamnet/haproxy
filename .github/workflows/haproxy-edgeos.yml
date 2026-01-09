@@ -1,11 +1,10 @@
-# File: .github/workflows/build-mips.yml
-name: Build HAProxy MIPS Binaries for EdgeRouter 12
+name: Compile for EdgeRouter 12
 
 on:
   workflow_dispatch:
     inputs:
       tag:
-        description: 'Git tag to build'
+        description: 'Git tag to build (must be v2.2.0)'
         required: true
         default: 'v2.2.0'
 
@@ -15,21 +14,17 @@ permissions:
 jobs:
   cross-compilation:
     runs-on: ubuntu-18.04
-
-    # Only run if the tag input matches v2.2.0
     if: ${{ github.event.inputs.tag == 'v2.2.0' }}
 
     strategy:
       matrix:
-        platform:
-          - arch: mips-linux-gnu
-            libs: libc6-dev-mips-cross
-            target: -static linux-mips32
-          - arch: mips64-linux-gnuabi64
-            libs: libc6-dev-mips64-cross
-            target: -static linux64-mips64
+        variant:
+          - name: mips64-k64-u64
+            target_flags: "-static"       # Pure 64-bit userland
+          - name: mips64-k64-u32
+            target_flags: "-static -mabi=32"  # 32-bit userland, 64-bit kernel
 
-    name: Build for ${{ matrix.platform.arch }}
+    name: Build ${{ matrix.variant.name }}
 
     steps:
       - name: Checkout code
@@ -37,33 +32,40 @@ jobs:
         with:
           ref: ${{ github.event.inputs.tag }}
 
-      - name: Install cross-compiler packages
+      - name: Install cross-compiler
         run: |
           sudo apt-get update
-          sudo apt-get install -y \
-            gcc-${{ matrix.platform.arch }} \
-            ${{ matrix.platform.libs }}
+          sudo apt-get install -y gcc-mips64-linux-gnuabi64
 
       - name: Set up environment
         run: |
-          export CC=${{ matrix.platform.arch }}-gcc
-          export TARGET="${{ matrix.platform.target }}"
+          export CC=mips64-linux-gnuabi64-gcc
+          export CFLAGS="${{ matrix.variant.target_flags }}"
+          export LDFLAGS="${{ matrix.variant.target_flags }}"
 
-      - name: Build HAProxy
+      - name: Build HAProxy statically
         run: |
           make clean
           make \
             CC=${CC} \
+            CFLAGS="${CFLAGS}" \
+            LDFLAGS="${LDFLAGS}" \
             TARGET=linux-glibc \
-            USE_OPENSSL=1 \
-            USE_ZLIB=1 \
-            USE_PCRE=1 \
+            USE_OPENSSL=0 \
+            USE_ZLIB=0 \
+            USE_PCRE=0 \
             USE_SYSTEMD=0 \
-            ADDLIB="-static" \
+            ADDLIB="" \
             V=1
 
-      - name: Upload build artifacts
+      - name: Verify binary type
+        run: |
+          echo "Binary info:"
+          file ./haproxy
+          readelf -h ./haproxy | grep 'Class\|Data'
+
+      - name: Upload static binary
         uses: actions/upload-artifact@v3
         with:
-          name: haproxy-${{ matrix.platform.arch }}
+          name: haproxy-${{ matrix.variant.name }}-static
           path: ./haproxy
