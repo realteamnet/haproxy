@@ -1,71 +1,65 @@
-name: Compile for EdgeRouter 12
+name: HAProxy v2.2.34 Debian 9 MIPS64 Build
 
 on:
-  workflow_dispatch:
-    inputs:
-      tag:
-        description: 'Git tag to build (must be v2.2.0)'
-        required: true
-        default: 'v2.2.0'
-
-permissions:
-  contents: read
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+  workflow_dispatch: 
 
 jobs:
-  cross-compilation:
-    runs-on: ubuntu-18.04
-    if: ${{ github.event.inputs.tag == 'v2.2.0' }}
-
+  build-mips:
+    runs-on: ubuntu-latest
     strategy:
       matrix:
-        variant:
-          - name: mips64-k64-u64
-            target_flags: "-static"       # Pure 64-bit userland
-          - name: mips64-k64-u32
-            target_flags: "-static -mabi=32"  # 32-bit userland, 64-bit kernel
-
-    name: Build ${{ matrix.variant.name }}
+        # n64 = 64-bit | n32 = High performance 32-bit (ABI2)
+        abi: [n64, n32]
 
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v3
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Build HAProxy in Debian 9 Container
+        run: |
+          # Targeting mips64el (Little Endian). 
+          docker run --rm -v ${{ github.workspace }}:/output debian/stretch-slim-mips64el:latest /bin/bash -c "
+            # 1. Point to Archive Repos
+            echo 'deb http://archive.debian.org/debian stretch main' > /etc/apt/sources.list && \
+            echo 'Acquire::Check-Valid-Until \"false\";' > /etc/apt/apt.conf.d/99no-check-valid && \
+            
+            # 2. Install Build Dependencies
+            # --- UNCOMMENT BELOW TO ENABLE LUA ---
+            # apt-get update && apt-get install -y --force-yes build-essential git libpcre3-dev libssl-dev zlib1g-dev lua5.3 liblua5.3-dev && \
+            apt-get update && apt-get install -y --force-yes build-essential git libpcre3-dev libssl-dev zlib1g-dev && \
+            
+            # 3. Pull directly from official HAProxy GitHub
+            git clone --branch v2.2.34 --depth 1 https://github.com/haproxy/haproxy.git && \
+            cd haproxy && \
+            
+            # 4. Compile
+            # --- UNCOMMENT LUA LINES TO ENABLE ---
+            make -j$(nproc) \
+              TARGET=linux-glibc \
+              CPU=generic \
+              ARCH=mips64 \
+              ADDLIB=\"-latomic\" \
+              CFLAGS=\"-mabi=${{ matrix.abi }} -O2\" \
+              LDFLAGS=\"-mabi=${{ matrix.abi }}\" \
+              USE_PCRE=1 USE_OPENSSL=1 USE_ZLIB=1 && \
+              # USE_LUA=1 \
+              # LUA_LIB_NAME=lua5.3 && \
+            
+            # 5. Verify Build
+            echo '--- VERIFICATION ---' && \
+            file haproxy && \
+            readelf -h haproxy | grep -E 'Class|Machine|Flags' && \
+            
+            # 6. Copy to output
+            cp haproxy /output/haproxy-2.2.34-${{ matrix.abi }}
+          "
+
+      - name: Upload Artifacts
+        uses: actions/upload-artifact@v4
         with:
-          ref: ${{ github.event.inputs.tag }}
-
-      - name: Install cross-compiler
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y gcc-mips64-linux-gnuabi64
-
-      - name: Set up environment
-        run: |
-          export CC=mips64-linux-gnuabi64-gcc
-          export CFLAGS="${{ matrix.variant.target_flags }}"
-          export LDFLAGS="${{ matrix.variant.target_flags }}"
-
-      - name: Build HAProxy statically
-        run: |
-          make clean
-          make \
-            CC=${CC} \
-            CFLAGS="${CFLAGS}" \
-            LDFLAGS="${LDFLAGS}" \
-            TARGET=linux-glibc \
-            USE_OPENSSL=0 \
-            USE_ZLIB=0 \
-            USE_PCRE=0 \
-            USE_SYSTEMD=0 \
-            ADDLIB="" \
-            V=1
-
-      - name: Verify binary type
-        run: |
-          echo "Binary info:"
-          file ./haproxy
-          readelf -h ./haproxy | grep 'Class\|Data'
-
-      - name: Upload static binary
-        uses: actions/upload-artifact@v3
-        with:
-          name: haproxy-${{ matrix.variant.name }}-static
-          path: ./haproxy
+          name: haproxy-v2.2.34-mips64-${{ matrix.abi }}
+          path: haproxy-2.2.34-${{ matrix.abi }}
