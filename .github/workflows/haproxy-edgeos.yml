@@ -1,17 +1,17 @@
-name: HAProxy Debian 9 MIPS64 Build
+name: HAProxy Debian 9 MIPS64 Build (Official Git)
 
 on:
   workflow_dispatch:
     inputs:
       haproxy_version:
-        description: 'Select HAProxy Version'
+        description: 'Select HAProxy Version (v2.4.x)'
         required: true
-        default: '2.4.30' # Set as the new default
+        default: '2.4.30'
         type: choice
         options:
-          - '2.4.30'  # Best balance of features and compatibility
-          - '2.2.34'  # Legacy LTS (Max compatibility)
-          - '2.0.31'  # Older LTS
+          - '2.4.30'
+          - '2.4.29'
+          - '2.4.24'
   push:
     branches: [ main ]
 
@@ -20,6 +20,7 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       matrix:
+        # n64 = 64-bit | n32 = Optimized 64-bit registers with 32-bit pointers
         abi: [n64, n32]
 
     steps:
@@ -29,19 +30,19 @@ jobs:
       - name: Build HAProxy in Debian 9 Container
         run: |
           docker run --rm -v ${{ github.workspace }}:/output debian/stretch-slim-mips64el:latest /bin/bash -c "
-            # 1. Point to Archive Repos
+            # 1. Point to Archive Repos (Mandatory for Debian 9)
             echo 'deb http://archive.debian.org/debian stretch main' > /etc/apt/sources.list && \
             echo 'Acquire::Check-Valid-Until \"false\";' > /etc/apt/apt.conf.d/99no-check-valid && \
             
             # 2. Install Build Dependencies
             apt-get update && apt-get install -y --force-yes build-essential git libpcre3-dev libssl-dev zlib1g-dev && \
             
-            # 3. Clone and Checkout selected version
-            git clone --branch v${{ github.event.inputs.haproxy_version || '2.4.30' }} --depth 1 https://github.com/haproxy/haproxy.git && \
-            cd haproxy && \
+            # 3. Clone from Official git.haproxy.org
+            # We use the 2.4 branch repository and check out the specific tag
+            git clone --depth 1 --branch v${{ github.event.inputs.haproxy_version || '2.4.30' }} http://git.haproxy.org/git/haproxy-2.4.git/ haproxy-src && \
+            cd haproxy-src && \
             
             # 4. Compile with MIPS-specific flags
-            # TARGET=linux-glibc is ideal for Debian 9's glibc 2.24
             make -j$(nproc) \
               TARGET=linux-glibc \
               CPU=generic \
