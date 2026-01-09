@@ -1,0 +1,18 @@
+# File: .github/workflows/build-mips.yml
+name: Build HAProxy MIPS Binaries for EdgeRouter
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build-mips:
+    uses: haproxy/haproxy/.github/workflows/cross-zoo.yml@master
+    with:
+      # Build only big-endian MIPS variants
+      TARGETS: |
+        mips
+        mips64
+      # HAProxy version/tag
+      VERSION: v2.2.0
+    # Use Ubuntu 18.04 runner
+    runs-on: ubuntu-18.04
