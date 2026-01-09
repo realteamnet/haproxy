@@ -1,19 +1,9 @@
-name: HAProxy Debian 9 MIPS64 Build (Official Git)
+name: HAProxy Debian 9 MIPS64 Build
 
 on:
-  workflow_dispatch:
-    inputs:
-      haproxy_version:
-        description: 'Select HAProxy Version (v2.4.x)'
-        required: true
-        default: '2.4.30'
-        type: choice
-        options:
-          - '2.4.30'
-          - '2.4.29'
-          - '2.4.24'
   push:
     branches: [ main ]
+  workflow_dispatch: # Allows manual trigger without inputs
 
 jobs:
   build-mips:
@@ -29,17 +19,18 @@ jobs:
 
       - name: Build HAProxy in Debian 9 Container
         run: |
+          # Use mips64el (Little Endian). Swap image to 'debian/stretch-slim-mips64' if Big Endian.
           docker run --rm -v ${{ github.workspace }}:/output debian/stretch-slim-mips64el:latest /bin/bash -c "
-            # 1. Point to Archive Repos (Mandatory for Debian 9)
+            # 1. Point to Archive Repos (Critical for Debian 9 EOL)
             echo 'deb http://archive.debian.org/debian stretch main' > /etc/apt/sources.list && \
             echo 'Acquire::Check-Valid-Until \"false\";' > /etc/apt/apt.conf.d/99no-check-valid && \
             
             # 2. Install Build Dependencies
             apt-get update && apt-get install -y --force-yes build-essential git libpcre3-dev libssl-dev zlib1g-dev && \
             
-            # 3. Clone from Official git.haproxy.org
-            # We use the 2.4 branch repository and check out the specific tag
-            git clone --depth 1 --branch v${{ github.event.inputs.haproxy_version || '2.4.30' }} http://git.haproxy.org/git/haproxy-2.4.git/ haproxy-src && \
+            # 3. Clone from Official git.haproxy.org (latest 2.4 branch)
+            # Pulling the v2.4.30 tag specifically for the 'latest 2.4' requirement
+            git clone --depth 1 --branch v2.4.30 http://git.haproxy.org/git/haproxy-2.4.git/ haproxy-src && \
             cd haproxy-src && \
             
             # 4. Compile with MIPS-specific flags
@@ -52,15 +43,15 @@ jobs:
               LDFLAGS=\"-mabi=${{ matrix.abi }}\" \
               USE_PCRE=1 USE_OPENSSL=1 USE_ZLIB=1 && \
             
-            # 5. Verify and Export
+            # 5. Verify Architecture and Export
             echo '--- BINARY INFO ---' && \
             file haproxy && \
             readelf -h haproxy | grep -E 'Class|Machine|Flags' && \
-            cp haproxy /output/haproxy-${{ github.event.inputs.haproxy_version || '2.4.30' }}-${{ matrix.abi }}
+            cp haproxy /output/haproxy-2.4.30-${{ matrix.abi }}
           "
 
       - name: Upload Artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: haproxy-${{ github.event.inputs.haproxy_version || '2.4.30' }}-${{ matrix.abi }}
-          path: haproxy-${{ github.event.inputs.haproxy_version || '2.4.30' }}-${{ matrix.abi }}
+          name: haproxy-2.4.30-mips64-${{ matrix.abi }}
+          path: haproxy-2.4.30-${{ matrix.abi }}
