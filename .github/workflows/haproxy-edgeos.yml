@@ -126,8 +126,10 @@ jobs:
       - name: Configure apt sources for Debian Stretch
         run: |
           sudo chroot /tmp/rootfs/merged /bin/bash -c "echo 'deb http://archive.debian.org/debian stretch main contrib non-free' > /etc/apt/sources.list"
+          sudo chroot /tmp/rootfs/merged /bin/bash -c "echo 'deb http://archive.debian.org/debian-security stretch/updates main contrib non-free' >> /etc/apt/sources.list"
           sudo chroot /tmp/rootfs/merged /bin/bash -c "echo 'Acquire::Check-Valid-Until \"false\";' > /etc/apt/apt.conf.d/99no-check-valid-until"
           sudo chroot /tmp/rootfs/merged /bin/bash -c "apt-get update -o Acquire::Check-Valid-Until=false"
+
 
       - name: Install build tools in chroot
         run: |
