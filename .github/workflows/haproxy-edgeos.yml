@@ -114,11 +114,10 @@ jobs:
 
       - name: Create chroot (Debian Stretch archive)
         run: |
-          # For archived Debian releases we must allow unauthenticated packages
+          # Use unauthenticated packages since Stretch is archived
           sudo debootstrap \
             --arch=mips64 \
             --variant=minbase \
-            --keyring=/usr/share/keyrings/debian-archive-keyring.gpg \
             --allow-unauthenticated \
             ${{ inputs.target_release }} \
             rootfs \
