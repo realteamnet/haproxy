@@ -1,5 +1,4 @@
-name: HAProxy 2.4 – MIPS64 Cross-Compile on Ubuntu
-
+name: HAProxy 2.4 – MIPS64 Cross-Compile with Target OS Libraries (Bind Mount)
 
 on:
   workflow_dispatch:
@@ -17,43 +16,11 @@ on:
         type: choice
         options: [static, dynamic]
 
-      cpu_bits:
-        description: "CPU bitness"
+      target_os_url:
+        description: "URL of the target OS image"
         required: false
-        default: "64"
-        type: choice
-        options: ["64"]
-
-      userland_bits:
-        description: "Userland bitness"
-        required: false
-        default: "32"
-        type: choice
-        options: ["32", "64"]
-
-      abi:
-        description: "MIPS ABI"
-        required: false
-        default: "n32"
-        type: choice
-        options: [n32, n64]
-
-      target_distro:
-        description: "Target Linux distro"
-        required: false
-        default: "debian"
-        type: choice
-        options: [debian, ubuntu]
-
-      target_release:
-        description: "Target release (used for glibc/OpenSSL inference)"
-        required: false
-        default: "stretch"
+        default: "https://dl.ui.com/firmwares/edgemax/3.0.1/ER-e300.v3.0.1.5862409.tar"
         type: string
-
-  push:
-    paths:
-      - ".github/workflows/haproxy-edgeos.yml"
 
 permissions:
   contents: write
@@ -68,67 +35,49 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Derive toolchain and flags
-        id: vars
-        run: |
-          # Set cross-compiler triplet and CFLAGS based on ABI/userland
-          if [ "${{ inputs.userland_bits }}" = "32" ] && [ "${{ inputs.abi }}" = "n32" ]; then
-            echo "triplet=mips64-linux-gnuabin32" >> $GITHUB_OUTPUT
-            echo "cflags=-mabi=n32" >> $GITHUB_OUTPUT
-            echo "abi_suffix=n32" >> $GITHUB_OUTPUT
-            echo "ul_bits=32" >> $GITHUB_OUTPUT
-          else
-            echo "triplet=mips64-linux-gnuabi64" >> $GITHUB_OUTPUT
-            echo "cflags=-mabi=64" >> $GITHUB_OUTPUT
-            echo "abi_suffix=n64" >> $GITHUB_OUTPUT
-            echo "ul_bits=64" >> $GITHUB_OUTPUT
-          fi
-
-          # Linking flags
-          linking="${{ inputs.linking }}"
-          if [ -z "$linking" ]; then
-            linking="dynamic"
-          fi
-
-          if [ "$linking" = "static" ]; then
-            echo "ldflags=-static" >> $GITHUB_OUTPUT
-            echo "link_suffix=static" >> $GITHUB_OUTPUT
-          else
-            echo "ldflags=" >> $GITHUB_OUTPUT
-            echo "link_suffix=dynamic" >> $GITHUB_OUTPUT
-          fi
-
-      - name: Determine target library compatibility
-        run: |
-          # Map target distro/release to glibc/OpenSSL versions
-          if [[ "${{ inputs.target_distro }}" == "debian" && "${{ inputs.target_release }}" == "stretch" ]]; then
-            echo "TARGET_GLIBC=2.24" >> $GITHUB_ENV
-            echo "TARGET_OPENSSL=1.1.0" >> $GITHUB_ENV
-          elif [[ "${{ inputs.target_distro }}" == "ubuntu" && "${{ inputs.target_release }}" == "focal" ]]; then
-            echo "TARGET_GLIBC=2.31" >> $GITHUB_ENV
-            echo "TARGET_OPENSSL=1.1.1" >> $GITHUB_ENV
-          else
-            echo "TARGET_GLIBC=unknown" >> $GITHUB_ENV
-            echo "TARGET_OPENSSL=unknown" >> $GITHUB_ENV
-          fi
-          echo "Inferred TARGET_GLIBC=$TARGET_GLIBC, TARGET_OPENSSL=$TARGET_OPENSSL"
-
-      - name: Install cross-compiler and dependencies
+      - name: Install dependencies
         run: |
           sudo apt-get update
           sudo apt-get install -y \
-            build-essential \
-            git \
-            pkg-config \
-            libpcre3-dev \
-            zlib1g-dev \
-            gcc-mips64-linux-gnuabi64 \
-            g++-mips64-linux-gnuabi64
+            build-essential git pkg-config libpcre3-dev zlib1g-dev \
+            gcc-mips64-linux-gnuabi64 g++-mips64-linux-gnuabi64 \
+            squashfs-tools binutils curl
 
-          # For n32 ABI
-          if [ "${{ inputs.userland_bits }}" = "32" ] && [ "${{ inputs.abi }}" = "n32" ]; then
-            sudo apt-get install -y gcc-mips64-linux-gnuabin32 g++-mips64-linux-gnuabin32
+      - name: Download target OS image
+        run: |
+          echo "Downloading target OS image..."
+          curl -L -o target_os.tar "${{ inputs.target_os_url }}"
+          tar -xf target_os.tar vmlinux.tmp squashfs.tmp
+          echo "Firmware downloaded."
+
+      - name: Detect target CPU, ABI, and bitness from kernel
+        id: detect
+        run: |
+          KERNEL=vmlinux.tmp
+          if [ ! -f $KERNEL ]; then
+            echo "Kernel file vmlinux.tmp not found, using defaults."
+            echo "arch=MIPS64" >> $GITHUB_ENV
+            echo "cpu_bits=64" >> $GITHUB_ENV
+            echo "abi=n32" >> $GITHUB_ENV
+          else
+            ARCH=$(file $KERNEL | awk '{print $4}')
+            BITS=$(file $KERNEL | awk '{print $2}' | sed 's/ELF//')
+            ABI=$(readelf -h $KERNEL | grep Flags | awk '{print $2}')
+            echo "Detected ARCH=$ARCH"
+            echo "Detected BITS=$BITS"
+            echo "Detected ABI=$ABI"
+            echo "arch=$ARCH" >> $GITHUB_ENV
+            echo "cpu_bits=$BITS" >> $GITHUB_ENV
+            echo "abi=$ABI" >> $GITHUB_ENV
           fi
+
+      - name: Mount target OS root filesystem (bind mount)
+        run: |
+          mkdir -p /mnt/target_root /tmp/target_root
+          echo "Mounting squashfs.tmp as loop device..."
+          sudo mount -o loop,ro squashfs.tmp /mnt/target_root
+          sudo mount --bind /mnt/target_root /tmp/target_root
+          echo "Target root filesystem available at /tmp/target_root"
 
       - name: Build HAProxy
         run: |
@@ -138,14 +87,29 @@ jobs:
           fi
 
           linking="${{ inputs.linking }}"
-          if [ -z "$linking" ]; then
-            linking="dynamic"
+          if [ -z "$linking" ]; then linking="dynamic"; fi
+
+          # Determine cross-compiler triplet and CFLAGS based on ABI
+          if [ "${{ env.abi }}" = "n32" ]; then
+            TRIPLET=mips64-linux-gnuabin32
+            CFLAGS="-mabi=n32"
+          else
+            TRIPLET=mips64-linux-gnuabi64
+            CFLAGS="-mabi=64"
           fi
 
-          export CC=${{ steps.vars.outputs.triplet }}-gcc
-          export CXX=${{ steps.vars.outputs.triplet }}-g++
-          export CFLAGS="${{ steps.vars.outputs.cflags }}"
-          export LDFLAGS="${{ steps.vars.outputs.cflags }} ${{ steps.vars.outputs.ldflags }}"
+          LDFLAGS="$CFLAGS"
+          if [ "$linking" = "static" ]; then
+            LDFLAGS="$LDFLAGS -static"
+          fi
+
+          export CC=$TRIPLET-gcc
+          export CXX=$TRIPLET-g++
+          export CFLAGS
+          export LDFLAGS
+
+          SYSROOT=/tmp/target_root
+          echo "Using sysroot: $SYSROOT"
 
           git clone "$git_repo" haproxy
           cd haproxy
@@ -155,30 +119,37 @@ jobs:
             USE_ZLIB=1 \
             USE_PCRE=1 \
             USE_STATIC_PCRE=$( [ "$linking" = "static" ] && echo 1 || echo 0 ) \
-            USE_OPENSSL=0
+            USE_OPENSSL=0 \
+            CC="$CC --sysroot=$SYSROOT" \
+            CFLAGS="$CFLAGS --sysroot=$SYSROOT" \
+            LDFLAGS="$LDFLAGS --sysroot=$SYSROOT" || { echo "Build failed"; exit 1; }
 
-          install -m 0755 haproxy ./haproxy-cross
+          install -m 0755 haproxy ../haproxy-cross
 
       - name: Rename binary
         run: |
-          mv haproxy-cross \
-            haproxy-latest-linux-mips64-cpu${{ inputs.cpu_bits }}-ul${{ steps.vars.outputs.ul_bits }}-${{ steps.vars.outputs.abi_suffix }}-${{ steps.vars.outputs.link_suffix }}-${{ inputs.target_distro }}${{ inputs.target_release }}
+          if [ ! -f ../haproxy-cross ]; then
+            echo "ERROR: haproxy-cross does not exist!"
+            exit 1
+          fi
 
-      - name: Create or update GitHub release
+          OUTPUT=haproxy-latest-${{ env.arch }}-cpu${{ env.cpu_bits }}-${{ env.abi }}-${{ inputs.linking }}
+          mv ../haproxy-cross "$OUTPUT"
+          echo "Built binary: $OUTPUT"
+
+      - name: Create GitHub release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: latest
-          name: HAProxy latest (MIPS64 ${{ inputs.target_distro }} ${{ inputs.target_release }})
-          body: |
-            Automated HAProxy cross-compile from repository ${{ inputs.git_repo }}
-
-            CPU bitness:      ${{ inputs.cpu_bits }}-bit
-            Userland bitness: ${{ inputs.userland_bits }}-bit
-            ABI:              ${{ inputs.abi }}
-            Linking:          ${{ inputs.linking }}
-            Target glibc:     ${{ env.TARGET_GLIBC }}
-            Target OpenSSL:   ${{ env.TARGET_OPENSSL }}
-          files: |
-            haproxy-latest-linux-mips64-cpu${{ inputs.cpu_bits }}-ul${{ steps.vars.outputs.ul_bits }}-${{ steps.vars.outputs.abi_suffix }}-${{ steps.vars.outputs.link_suffix }}-${{ inputs.target_distro }}${{ inputs.target_release }}
+          name: HAProxy latest (${{ env.arch }} ${{ env.cpu_bits }}-bit ${{ env.abi }})
+          body: Automated HAProxy cross-compile from ${{ inputs.git_repo }}
+          files: haproxy-latest-*
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Cleanup mounts
+        if: always()
+        run: |
+          sudo umount /tmp/target_root || true
+          sudo umount /mnt/target_root || true
+          echo "Cleanup complete."
