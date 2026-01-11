@@ -1,6 +1,10 @@
 name: HAProxy 2.4 – MIPS64 Cross-Compile with Target OS Libraries (Bind Mount)
 
 on:
+  push:
+    # Trigger only when this workflow YAML is updated
+    paths:
+      - .github/workflows/haproxy-edgeos.yml
   workflow_dispatch:
     inputs:
       git_repo:
