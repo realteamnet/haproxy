@@ -1,4 +1,4 @@
-name: HAProxy 2.4 – MIPS64 (Cross-Compile in Debian Stretch Chroot)
+name: HAProxy 2.4 – MIPS64 Cross-Compile on Ubuntu
 
 on:
   workflow_dispatch:
@@ -38,14 +38,14 @@ on:
         options: [n32, n64]
 
       target_distro:
-        description: "Target Linux distro for chroot"
+        description: "Target Linux distro"
         required: true
         default: "debian"
         type: choice
         options: [debian, ubuntu]
 
       target_release:
-        description: "Distro release / glibc baseline"
+        description: "Target release (used for glibc/OpenSSL inference)"
         required: true
         default: "stretch"
         type: string
@@ -62,29 +62,15 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout
-        uses: actions/checkout@v3
-
-      - name: Validate CPU / userland / ABI
-        run: |
-          if [ "${{ inputs.cpu_bits }}" != "64" ]; then
-            echo "ERROR: MIPS64 requires a 64-bit CPU"
-            exit 1
-          fi
-
-          if [ "${{ inputs.userland_bits }}" = "32" ] && [ "${{ inputs.abi }}" != "n32" ]; then
-            echo "ERROR: 32-bit userland requires n32 ABI"
-            exit 1
-          fi
-
-          if [ "${{ inputs.userland_bits }}" = "64" ] && [ "${{ inputs.abi }}" != "n64" ]; then
-            echo "ERROR: 64-bit userland requires n64 ABI"
-            exit 1
-          fi
+      - name: Checkout repository
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0  # ensures all tags are available for HAProxy repo
 
       - name: Derive toolchain and flags
         id: vars
         run: |
+          # Set cross-compiler triplet and CFLAGS based on ABI
           if [ "${{ inputs.userland_bits }}" = "32" ] && [ "${{ inputs.abi }}" = "n32" ]; then
             echo "triplet=mips64-linux-gnuabin32" >> $GITHUB_OUTPUT
             echo "cflags=-mabi=n32" >> $GITHUB_OUTPUT
@@ -97,6 +83,7 @@ jobs:
             echo "ul_bits=64" >> $GITHUB_OUTPUT
           fi
 
+          # Linking flags
           if [ "${{ inputs.linking }}" = "static" ]; then
             echo "ldflags=-static" >> $GITHUB_OUTPUT
             echo "link_suffix=static" >> $GITHUB_OUTPUT
@@ -105,83 +92,61 @@ jobs:
             echo "link_suffix=dynamic" >> $GITHUB_OUTPUT
           fi
 
-      - name: Install host tools
+      - name: Determine target library compatibility
+        run: |
+          # Map target distro/release to glibc/OpenSSL versions
+          if [[ "${{ inputs.target_distro }}" == "debian" && "${{ inputs.target_release }}" == "stretch" ]]; then
+            echo "TARGET_GLIBC=2.24" >> $GITHUB_ENV
+            echo "TARGET_OPENSSL=1.1.0" >> $GITHUB_ENV
+          elif [[ "${{ inputs.target_distro }}" == "ubuntu" && "${{ inputs.target_release }}" == "focal" ]]; then
+            echo "TARGET_GLIBC=2.31" >> $GITHUB_ENV
+            echo "TARGET_OPENSSL=1.1.1" >> $GITHUB_ENV
+          else
+            echo "TARGET_GLIBC=unknown" >> $GITHUB_ENV
+            echo "TARGET_OPENSSL=unknown" >> $GITHUB_ENV
+          fi
+          echo "Inferred TARGET_GLIBC=$TARGET_GLIBC, TARGET_OPENSSL=$TARGET_OPENSSL"
+
+      - name: Install cross-compiler and dependencies
         run: |
           sudo apt-get update
           sudo apt-get install -y \
-            git \
-            debootstrap \
             build-essential \
-            binutils \
+            git \
             pkg-config \
             libpcre3-dev \
-            zlib1g-dev
+            zlib1g-dev \
+            gcc-mips64-linux-gnuabi64 \
+            g++-mips64-linux-gnuabi64
 
-      - name: Create native chroot (Debian Stretch)
-        run: |
-          sudo debootstrap \
-            --arch=amd64 \
-            --variant=minbase \
-            --no-check-gpg \
-            ${{ inputs.target_release }} \
-            rootfs \
-            http://archive.debian.org/debian/
-
-      - name: Disable expired Release checks inside chroot
-        run: |
-          sudo mkdir -p rootfs/etc/apt/apt.conf.d
-          echo 'Acquire::Check-Valid-Until "false";' | sudo tee rootfs/etc/apt/apt.conf.d/99no-check-valid-until
-
-      - name: Prepare chroot
-        run: |
-          sudo mount --bind /proc rootfs/proc
-          sudo mount --bind /sys rootfs/sys
-          sudo mount --bind /dev rootfs/dev
-
-      - name: Cross-compile HAProxy inside chroot
-        run: |
-          sudo chroot rootfs /bin/bash -eux << EOF
-          export DEBIAN_FRONTEND=noninteractive
-
-          # Install cross-toolchain inside chroot
-          apt-get update
-          apt-get install -y git build-essential pkg-config libpcre3-dev zlib1g-dev
-
-          if [ "${{ inputs.abi }}" = "n32" ]; then
-            apt-get install -y gcc-mips64-linux-gnuabin32 g++-mips64-linux-gnuabin32
-            export CC=mips64-linux-gnuabin32-gcc
-            export CXX=mips64-linux-gnuabin32-g++
-            export CFLAGS="-mabi=n32"
-          else
-            apt-get install -y gcc-mips64-linux-gnuabi64 g++-mips64-linux-gnuabi64
-            export CC=mips64-linux-gnuabi64-gcc
-            export CXX=mips64-linux-gnuabi64-g++
-            export CFLAGS="-mabi=64"
+          # For n32 ABI
+          if [ "${{ inputs.userland_bits }}" = "32" ] && [ "${{ inputs.abi }}" = "n32" ]; then
+            sudo apt-get install -y gcc-mips64-linux-gnuabin32 g++-mips64-linux-gnuabin32
           fi
 
-          if [ "${{ inputs.linking }}" = "static" ]; then
-            export LDFLAGS="-static"
-          else
-            export LDFLAGS=""
-          fi
+      - name: Build HAProxy
+        run: |
+          export CC=${{ steps.vars.outputs.triplet }}-gcc
+          export CXX=${{ steps.vars.outputs.triplet }}-g++
+          export CFLAGS="${{ steps.vars.outputs.cflags }}"
+          export LDFLAGS="${{ steps.vars.outputs.cflags }} ${{ steps.vars.outputs.ldflags }}"
 
           git clone ${{ inputs.git_repo }} haproxy
           cd haproxy
 
-          make -j\$(nproc) \
+          make -j$(nproc) \
             TARGET=linux-glibc \
             USE_ZLIB=1 \
             USE_PCRE=1 \
             USE_STATIC_PCRE=$( [ "${{ inputs.linking }}" = "static" ] && echo 1 || echo 0 ) \
-            USE_OPENSSL=0 \
-            USE_LUA=0
+            USE_OPENSSL=0
 
-          install -m 0755 haproxy /output-haproxy
-          EOF
+          install -m 0755 haproxy ./haproxy-cross
 
-      - name: Copy binary out of chroot
+      - name: Rename binary
         run: |
-          sudo cp rootfs/output-haproxy ./haproxy
+          mv haproxy-cross \
+            haproxy-latest-linux-mips64-cpu${{ inputs.cpu_bits }}-ul${{ steps.vars.outputs.ul_bits }}-${{ steps.vars.outputs.abi_suffix }}-${{ steps.vars.outputs.link_suffix }}-${{ inputs.target_distro }}${{ inputs.target_release }}
 
       - name: Create or update GitHub release
         uses: softprops/action-gh-release@v2
@@ -195,29 +160,9 @@ jobs:
             Userland bitness: ${{ inputs.userland_bits }}-bit
             ABI:              ${{ inputs.abi }}
             Linking:          ${{ inputs.linking }}
-            Distro:           ${{ inputs.target_distro }} ${{ inputs.target_release }} (glibc)
-          files: |
-            haproxy
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Rename asset
-        run: |
-          mv haproxy \
-            haproxy-latest-linux-mips64-cpu${{ inputs.cpu_bits }}-ul${{ steps.vars.outputs.ul_bits }}-${{ steps.vars.outputs.abi_suffix }}-${{ steps.vars.outputs.link_suffix }}-${{ inputs.target_distro }}${{ inputs.target_release }}
-
-      - name: Upload renamed asset
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: latest
+            Target glibc:     ${{ env.TARGET_GLIBC }}
+            Target OpenSSL:   ${{ env.TARGET_OPENSSL }}
           files: |
             haproxy-latest-linux-mips64-cpu${{ inputs.cpu_bits }}-ul${{ steps.vars.outputs.ul_bits }}-${{ steps.vars.outputs.abi_suffix }}-${{ steps.vars.outputs.link_suffix }}-${{ inputs.target_distro }}${{ inputs.target_release }}
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Cleanup
-        if: always()
-        run: |
-          sudo umount -lf rootfs/proc || true
-          sudo umount -lf rootfs/sys || true
-          sudo umount -lf rootfs/dev || true
