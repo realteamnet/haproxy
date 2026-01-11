@@ -47,10 +47,38 @@ jobs:
             gcc-mips64-linux-gnuabi64 g++-mips64-linux-gnuabi64 \
             squashfs-tools binutils curl
 
+      - name: Set input defaults for push/manual runs
+        id: set_defaults
+        run: |
+          # Fallbacks for push-triggered runs
+          GIT_REPO="${{ inputs.git_repo }}"
+          if [ -z "$GIT_REPO" ]; then
+            GIT_REPO="http://git.haproxy.org/git/haproxy-2.4.git"
+          fi
+
+          LINKING="${{ inputs.linking }}"
+          if [ -z "$LINKING" ]; then
+            LINKING="dynamic"
+          fi
+
+          TARGET_OS_URL="${{ inputs.target_os_url }}"
+          if [ -z "$TARGET_OS_URL" ]; then
+            TARGET_OS_URL="https://dl.ui.com/firmwares/edgemax/3.0.1/ER-e300.v3.0.1.5862409.tar"
+          fi
+
+          echo "GIT_REPO=$GIT_REPO" >> $GITHUB_ENV
+          echo "LINKING=$LINKING" >> $GITHUB_ENV
+          echo "TARGET_OS_URL=$TARGET_OS_URL" >> $GITHUB_ENV
+
+          echo "Using values:"
+          echo "GIT_REPO = $GIT_REPO"
+          echo "LINKING = $LINKING"
+          echo "TARGET_OS_URL = $TARGET_OS_URL"
+
       - name: Download target OS image
         run: |
           echo "Downloading target OS image..."
-          curl -L -o target_os.tar "${{ inputs.target_os_url }}"
+          curl -L -o target_os.tar "$TARGET_OS_URL"
           tar -xf target_os.tar vmlinux.tmp squashfs.tmp
           echo "Firmware downloaded."
 
@@ -85,14 +113,6 @@ jobs:
 
       - name: Build HAProxy
         run: |
-          git_repo="${{ inputs.git_repo }}"
-          if [ -z "$git_repo" ]; then
-            git_repo="http://git.haproxy.org/git/haproxy-2.4.git"
-          fi
-
-          linking="${{ inputs.linking }}"
-          if [ -z "$linking" ]; then linking="dynamic"; fi
-
           # Determine cross-compiler triplet and CFLAGS based on ABI
           if [ "${{ env.abi }}" = "n32" ]; then
             TRIPLET=mips64-linux-gnuabin32
@@ -103,7 +123,7 @@ jobs:
           fi
 
           LDFLAGS="$CFLAGS"
-          if [ "$linking" = "static" ]; then
+          if [ "$LINKING" = "static" ]; then
             LDFLAGS="$LDFLAGS -static"
           fi
 
@@ -115,14 +135,14 @@ jobs:
           SYSROOT=/tmp/target_root
           echo "Using sysroot: $SYSROOT"
 
-          git clone "$git_repo" haproxy
+          git clone "$GIT_REPO" haproxy
           cd haproxy
 
           make -j$(nproc) \
             TARGET=linux-glibc \
             USE_ZLIB=1 \
             USE_PCRE=1 \
-            USE_STATIC_PCRE=$( [ "$linking" = "static" ] && echo 1 || echo 0 ) \
+            USE_STATIC_PCRE=$( [ "$LINKING" = "static" ] && echo 1 || echo 0 ) \
             USE_OPENSSL=0 \
             CC="$CC --sysroot=$SYSROOT" \
             CFLAGS="$CFLAGS --sysroot=$SYSROOT" \
@@ -137,7 +157,7 @@ jobs:
             exit 1
           fi
 
-          OUTPUT=haproxy-latest-${{ env.arch }}-cpu${{ env.cpu_bits }}-${{ env.abi }}-${{ inputs.linking }}
+          OUTPUT=haproxy-latest-${{ env.arch }}-cpu${{ env.cpu_bits }}-${{ env.abi }}-${LINKING}
           mv ../haproxy-cross "$OUTPUT"
           echo "Built binary: $OUTPUT"
 
@@ -146,7 +166,7 @@ jobs:
         with:
           tag_name: latest
           name: HAProxy latest (${{ env.arch }} ${{ env.cpu_bits }}-bit ${{ env.abi }})
-          body: Automated HAProxy cross-compile from ${{ inputs.git_repo }}
+          body: Automated HAProxy cross-compile from $GIT_REPO
           files: haproxy-latest-*
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
