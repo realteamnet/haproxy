@@ -1,57 +1,207 @@
-name: HAProxy Debian 9 MIPS64 Build
+name: HAProxy 2.4 – MIPS64 (Chroot Distro / CPU / Userland / ABI)
 
 on:
-  push:
-    branches: [ main ]
-  workflow_dispatch: # Allows manual trigger without inputs
+  workflow_dispatch:
+    inputs:
+      git_repo:
+        description: "Git repository URL to build"
+        required: true
+        default: "http://git.haproxy.org/git/haproxy-2.4.git"
+        type: string
+
+      linking:
+        description: "Executable type"
+        required: true
+        default: "dynamic"
+        type: choice
+        options: [static, dynamic]
+
+      cpu_bits:
+        description: "CPU bitness"
+        required: true
+        default: "64"
+        type: choice
+        options: ["64"]
+
+      userland_bits:
+        description: "Userland bitness"
+        required: true
+        default: "32"
+        type: choice
+        options: ["32", "64"]
+
+      abi:
+        description: "MIPS ABI"
+        required: true
+        default: "n32"
+        type: choice
+        options: [n32, n64]
+
+      target_distro:
+        description: "Target Linux distro for chroot"
+        required: true
+        default: "debian"
+        type: choice
+        options: [debian, ubuntu]
+
+      target_release:
+        description: "Distro release / glibc baseline"
+        required: true
+        default: "stretch"
+        type: string
+
+permissions:
+  contents: write
 
 jobs:
-  build-mips:
+  build:
     runs-on: ubuntu-latest
-    strategy:
-      matrix:
-        # n64 = 64-bit | n32 = Optimized 64-bit registers with 32-bit pointers
-        abi: [n64, n32]
 
     steps:
-      - name: Set up QEMU
-        uses: docker/setup-qemu-action@v3
-
-      - name: Build HAProxy in Debian 9 Container
+      - name: Validate CPU / userland / ABI
         run: |
-          # Use mips64el (Little Endian). Swap image to 'debian/stretch-slim-mips64' if Big Endian.
-          docker run --rm -v ${{ github.workspace }}:/output debian/stretch-slim-mips64el:latest /bin/bash -c "
-            # 1. Point to Archive Repos (Critical for Debian 9 EOL)
-            echo 'deb http://archive.debian.org/debian stretch main' > /etc/apt/sources.list && \
-            echo 'Acquire::Check-Valid-Until \"false\";' > /etc/apt/apt.conf.d/99no-check-valid && \
-            
-            # 2. Install Build Dependencies
-            apt-get update && apt-get install -y --force-yes build-essential git libpcre3-dev libssl-dev zlib1g-dev && \
-            
-            # 3. Clone from Official git.haproxy.org (latest 2.4 branch)
-            # Pulling the v2.4.30 tag specifically for the 'latest 2.4' requirement
-            git clone --depth 1 --branch v2.4.30 http://git.haproxy.org/git/haproxy-2.4.git/ haproxy-src && \
-            cd haproxy-src && \
-            
-            # 4. Compile with MIPS-specific flags
-            make -j$(nproc) \
-              TARGET=linux-glibc \
-              CPU=generic \
-              ARCH=mips64 \
-              ADDLIB=\"-latomic\" \
-              CFLAGS=\"-mabi=${{ matrix.abi }} -O2\" \
-              LDFLAGS=\"-mabi=${{ matrix.abi }}\" \
-              USE_PCRE=1 USE_OPENSSL=1 USE_ZLIB=1 && \
-            
-            # 5. Verify Architecture and Export
-            echo '--- BINARY INFO ---' && \
-            file haproxy && \
-            readelf -h haproxy | grep -E 'Class|Machine|Flags' && \
-            cp haproxy /output/haproxy-2.4.30-${{ matrix.abi }}
-          "
+          if [ "${{ inputs.cpu_bits }}" != "64" ]; then
+            echo "ERROR: MIPS64 requires a 64-bit CPU"
+            exit 1
+          fi
 
-      - name: Upload Artifacts
-        uses: actions/upload-artifact@v4
+          if [ "${{ inputs.userland_bits }}" = "32" ] && [ "${{ inputs.abi }}" != "n32" ]; then
+            echo "ERROR: 32-bit userland requires n32 ABI"
+            exit 1
+          fi
+
+          if [ "${{ inputs.userland_bits }}" = "64" ] && [ "${{ inputs.abi }}" != "n64" ]; then
+            echo "ERROR: 64-bit userland requires n64 ABI"
+            exit 1
+          fi
+
+      - name: Derive toolchain and flags
+        id: vars
+        run: |
+          if [ "${{ inputs.abi }}" = "n32" ]; then
+            echo "triplet=mips64-linux-gnuabin32" >> $GITHUB_OUTPUT
+            echo "cflags=-mabi=n32" >> $GITHUB_OUTPUT
+            echo "abi_suffix=n32" >> $GITHUB_OUTPUT
+            echo "ul_bits=32" >> $GITHUB_OUTPUT
+          else
+            echo "triplet=mips64-linux-gnuabi64" >> $GITHUB_OUTPUT
+            echo "cflags=-mabi=64" >> $GITHUB_OUTPUT
+            echo "abi_suffix=n64" >> $GITHUB_OUTPUT
+            echo "ul_bits=64" >> $GITHUB_OUTPUT
+          fi
+
+          if [ "${{ inputs.linking }}" = "static" ]; then
+            echo "ldflags=-static" >> $GITHUB_OUTPUT
+            echo "link_suffix=static" >> $GITHUB_OUTPUT
+          else
+            echo "ldflags=" >> $GITHUB_OUTPUT
+            echo "link_suffix=dynamic" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Install host tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            git \
+            debootstrap \
+            qemu-user-static \
+            binfmt-support
+
+      - name: Enable QEMU
+        run: |
+          sudo update-binfmts --enable qemu-mips64 || true
+
+      - name: Create chroot
+        run: |
+          sudo debootstrap \
+            --arch=mips64 \
+            ${{ inputs.target_release }} \
+            rootfs \
+            http://ftp.${{ inputs.target_distro }}.org/${{ inputs.target_distro }}/
+
+      - name: Prepare chroot
+        run: |
+          sudo cp /usr/bin/qemu-mips64-static rootfs/usr/bin/
+          sudo mount --bind /proc rootfs/proc
+          sudo mount --bind /sys rootfs/sys
+          sudo mount --bind /dev rootfs/dev
+
+      - name: Build HAProxy inside chroot
+        run: |
+          sudo chroot rootfs /bin/bash -eux << EOF
+          export DEBIAN_FRONTEND=noninteractive
+
+          apt-get update
+          apt-get install -y \
+            build-essential \
+            git \
+            ca-certificates \
+            pkg-config \
+            libpcre3-dev \
+            zlib1g-dev
+
+          apt-get install -y \
+            gcc-${{ steps.vars.outputs.triplet }} \
+            g++-${{ steps.vars.outputs.triplet }}
+
+          export CC=${{ steps.vars.outputs.triplet }}-gcc
+          export CXX=${{ steps.vars.outputs.triplet }}-g++
+          export CFLAGS="${{ steps.vars.outputs.cflags }}"
+          export LDFLAGS="${{ steps.vars.outputs.cflags }} ${{ steps.vars.outputs.ldflags }}"
+
+          git clone ${{ inputs.git_repo }} haproxy
+          cd haproxy
+
+          make -j\$(nproc) \
+            TARGET=linux-glibc \
+            USE_ZLIB=1 \
+            USE_PCRE=1 \
+            USE_STATIC_PCRE=$( [ "${{ inputs.linking }}" = "static" ] && echo 1 || echo 0 ) \
+            USE_OPENSSL=0 \
+            USE_LUA=0
+
+          install -m 0755 haproxy /output-haproxy
+          EOF
+
+      - name: Copy binary out of chroot
+        run: |
+          sudo cp rootfs/output-haproxy ./haproxy
+
+      - name: Create or update GitHub release
+        uses: softprops/action-gh-release@v2
         with:
-          name: haproxy-2.4.30-mips64-${{ matrix.abi }}
-          path: haproxy-2.4.30-${{ matrix.abi }}
+          tag_name: latest
+          name: HAProxy latest (MIPS64 ${{ inputs.target_distro }} ${{ inputs.target_release }})
+          body: |
+            Automated HAProxy build from repository ${{ inputs.git_repo }}
+
+            CPU bitness:      ${{ inputs.cpu_bits }}-bit
+            Userland bitness: ${{ inputs.userland_bits }}-bit
+            ABI:              ${{ inputs.abi }}
+            Linking:          ${{ inputs.linking }}
+            Distro:           ${{ inputs.target_distro }} ${{ inputs.target_release }} (glibc)
+          files: |
+            haproxy
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Rename asset
+        run: |
+          mv haproxy \
+            haproxy-latest-linux-mips64-cpu${{ inputs.cpu_bits }}-ul${{ steps.vars.outputs.ul_bits }}-${{ steps.vars.outputs.abi_suffix }}-${{ steps.vars.outputs.link_suffix }}-${{ inputs.target_distro }}${{ inputs.target_release }}
+
+      - name: Upload renamed asset
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: latest
+          files: |
+            haproxy-latest-linux-mips64-cpu${{ inputs.cpu_bits }}-ul${{ steps.vars.outputs.ul_bits }}-${{ steps.vars.outputs.abi_suffix }}-${{ steps.vars.outputs.link_suffix }}-${{ inputs.target_distro }}${{ inputs.target_release }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Cleanup
+        if: always()
+        run: |
+          sudo umount -lf rootfs/proc || true
+          sudo umount -lf rootfs/sys || true
+          sudo umount -lf rootfs/dev || true
