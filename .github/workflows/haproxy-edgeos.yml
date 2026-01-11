@@ -119,7 +119,11 @@ jobs:
 
       - name: Bind QEMU into chroot
         run: |
+          # Ensure directory exists
           sudo mkdir -p /tmp/rootfs/merged/usr/bin
+          # Create placeholder file in overlay so bind mount works
+          sudo touch /tmp/rootfs/merged/usr/bin/$QEMU_BIN
+          # Bind mount QEMU
           sudo mount --bind /usr/bin/$QEMU_BIN /tmp/rootfs/merged/usr/bin/$QEMU_BIN
 
       - name: Configure apt sources
