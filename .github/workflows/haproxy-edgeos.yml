@@ -112,10 +112,10 @@ jobs:
           echo "QEMU_BIN=$QEMU_BIN" >> $GITHUB_ENV
           echo "RELEASE_NAME=haproxy-latest-${ARCH}-${BITS}-hybrid" >> $GITHUB_ENV
 
-      - name: Bind QEMU into chroot
+      - name: Bind QEMU into chroot via /tmp/qemu-bin
         run: |
-          sudo mkdir -p /tmp/rootfs/mnt/usr/bin
-          sudo mount --bind /usr/bin/$QEMU_BIN /tmp/rootfs/mnt/usr/bin/$QEMU_BIN
+          sudo mkdir -p /tmp/rootfs/mnt/tmp/qemu-bin
+          sudo mount --bind /usr/bin/$QEMU_BIN /tmp/rootfs/mnt/tmp/qemu-bin/$QEMU_BIN
 
       - name: Configure apt sources
         run: |
@@ -129,6 +129,7 @@ jobs:
       - name: Clone and build HAProxy
         run: |
           sudo chroot /tmp/rootfs/mnt /bin/bash -c "
+            export PATH=/tmp/qemu-bin:\$PATH
             cd /tmp
             git clone $GIT_REPO
             repo_name=\$(basename $GIT_REPO .git)
