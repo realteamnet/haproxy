@@ -105,19 +105,29 @@ jobs:
             git \
             debootstrap \
             qemu-user-static \
-            binfmt-support
+            binfmt-support \
+            gnupg
 
       - name: Enable QEMU
         run: |
           sudo update-binfmts --enable qemu-mips64 || true
 
-      - name: Create chroot
+      - name: Create chroot (Debian Stretch archive)
         run: |
+          # For archived Debian releases we must allow unauthenticated packages
           sudo debootstrap \
             --arch=mips64 \
+            --variant=minbase \
+            --keyring=/usr/share/keyrings/debian-archive-keyring.gpg \
+            --allow-unauthenticated \
             ${{ inputs.target_release }} \
             rootfs \
-            http://ftp.${{ inputs.target_distro }}.org/${{ inputs.target_distro }}/
+            http://archive.debian.org/debian/
+
+      - name: Disable expired Release checks inside chroot
+        run: |
+          sudo mkdir -p rootfs/etc/apt/apt.conf.d
+          echo 'Acquire::Check-Valid-Until "false";' | sudo tee rootfs/etc/apt/apt.conf.d/99no-check-valid-until
 
       - name: Prepare chroot
         run: |
