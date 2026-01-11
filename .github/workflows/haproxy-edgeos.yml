@@ -5,48 +5,48 @@ on:
     inputs:
       git_repo:
         description: "Git repository URL to build"
-        required: true
+        required: false
         default: "http://git.haproxy.org/git/haproxy-2.4.git"
         type: string
 
       linking:
         description: "Executable type"
-        required: true
+        required: false
         default: "dynamic"
         type: choice
         options: [static, dynamic]
 
       cpu_bits:
         description: "CPU bitness"
-        required: true
+        required: false
         default: "64"
         type: choice
         options: ["64"]
 
       userland_bits:
         description: "Userland bitness"
-        required: true
+        required: false
         default: "32"
         type: choice
         options: ["32", "64"]
 
       abi:
         description: "MIPS ABI"
-        required: true
+        required: false
         default: "n32"
         type: choice
         options: [n32, n64]
 
       target_distro:
         description: "Target Linux distro"
-        required: true
+        required: false
         default: "debian"
         type: choice
         options: [debian, ubuntu]
 
       target_release:
         description: "Target release (used for glibc/OpenSSL inference)"
-        required: true
+        required: false
         default: "stretch"
         type: string
 
@@ -65,12 +65,12 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v5
         with:
-          fetch-depth: 0  # ensures all tags are available for HAProxy repo
+          fetch-depth: 0
 
       - name: Derive toolchain and flags
         id: vars
         run: |
-          # Set cross-compiler triplet and CFLAGS based on ABI
+          # Set cross-compiler triplet and CFLAGS based on ABI/userland
           if [ "${{ inputs.userland_bits }}" = "32" ] && [ "${{ inputs.abi }}" = "n32" ]; then
             echo "triplet=mips64-linux-gnuabin32" >> $GITHUB_OUTPUT
             echo "cflags=-mabi=n32" >> $GITHUB_OUTPUT
@@ -84,7 +84,12 @@ jobs:
           fi
 
           # Linking flags
-          if [ "${{ inputs.linking }}" = "static" ]; then
+          linking="${{ inputs.linking }}"
+          if [ -z "$linking" ]; then
+            linking="dynamic"
+          fi
+
+          if [ "$linking" = "static" ]; then
             echo "ldflags=-static" >> $GITHUB_OUTPUT
             echo "link_suffix=static" >> $GITHUB_OUTPUT
           else
@@ -126,19 +131,29 @@ jobs:
 
       - name: Build HAProxy
         run: |
+          git_repo="${{ inputs.git_repo }}"
+          if [ -z "$git_repo" ]; then
+            git_repo="http://git.haproxy.org/git/haproxy-2.4.git"
+          fi
+
+          linking="${{ inputs.linking }}"
+          if [ -z "$linking" ]; then
+            linking="dynamic"
+          fi
+
           export CC=${{ steps.vars.outputs.triplet }}-gcc
           export CXX=${{ steps.vars.outputs.triplet }}-g++
           export CFLAGS="${{ steps.vars.outputs.cflags }}"
           export LDFLAGS="${{ steps.vars.outputs.cflags }} ${{ steps.vars.outputs.ldflags }}"
 
-          git clone ${{ inputs.git_repo }} haproxy
+          git clone "$git_repo" haproxy
           cd haproxy
 
           make -j$(nproc) \
             TARGET=linux-glibc \
             USE_ZLIB=1 \
             USE_PCRE=1 \
-            USE_STATIC_PCRE=$( [ "${{ inputs.linking }}" = "static" ] && echo 1 || echo 0 ) \
+            USE_STATIC_PCRE=$( [ "$linking" = "static" ] && echo 1 || echo 0 ) \
             USE_OPENSSL=0
 
           install -m 0755 haproxy ./haproxy-cross
