@@ -1,156 +1,122 @@
-name: HAProxy 2.4 – MIPS64 Cross-Compile with Target OS Libraries (Bind Mount)
+name: Build HAProxy in SquashFS Image and Release
 
 on:
+  workflow_dispatch:
+    inputs:
+      git_repo_url:
+        description: 'Git repository URL to clone'
+        required: true
+        default: 'http://git.haproxy.org/git/haproxy-2.4.git'
+      tar_url:
+        description: 'URL to .tar image containing squashfs.tmp and vmlinux.tmp'
+        required: true
+        default: 'https://dl.ui.com/firmwares/edgemax/3.0.1/ER-e300.v3.0.1.5862409.tar'
+      release_tag:
+        description: 'Tag name for GitHub release'
+        required: true
+        default: 'auto-build'
+
   push:
     paths:
       - .github/workflows/haproxy-edgeos.yml
-  workflow_dispatch:
-    inputs:
-      git_repo:
-        description: "Git repository URL to build"
-        required: false
-        default: "http://git.haproxy.org/git/haproxy-2.4.git"
-        type: string
-
-      target_os_url:
-        description: "URL of the target OS image"
-        required: false
-        default: "https://dl.ui.com/firmwares/edgemax/3.0.1/ER-e300.v3.0.1.5862409.tar"
-        type: string
-
-permissions:
-  contents: write
 
 jobs:
-  build:
+  build-in-chroot:
     runs-on: ubuntu-latest
-
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v5
-        with:
-          fetch-depth: 0
+      - name: Checkout workflow
+        uses: actions/checkout@v3
+
+      - name: Set variables
+        id: vars
+        run: |
+          echo "GIT_REPO=${{ github.event.inputs.git_repo_url || 'http://git.haproxy.org/git/haproxy-2.4.git' }}" >> $GITHUB_ENV
+          echo "TAR_URL=${{ github.event.inputs.tar_url || 'https://dl.ui.com/firmwares/edgemax/3.0.1/ER-e300.v3.0.1.5862409.tar' }}" >> $GITHUB_ENV
+          echo "RELEASE_TAG=${{ github.event.inputs.release_tag || 'auto-build' }}" >> $GITHUB_ENV
 
       - name: Install dependencies
         run: |
           sudo apt-get update
           sudo apt-get install -y \
-            build-essential git pkg-config libpcre3-dev zlib1g-dev \
-            gcc-mips64-linux-gnuabi64 g++-mips64-linux-gnuabi64 \
-            squashfs-tools binutils curl file
+            qemu-user-static \
+            debootstrap \
+            squashfs-tools \
+            git \
+            wget \
+            curl \
+            build-essential \
+            gcc \
+            g++ \
+            make \
+            cmake \
+            automake \
+            autoconf \
+            file \
+            binutils \
+            libssl-dev
 
-      - name: Set input defaults
-        id: set_defaults
+      - name: Prepare rootfs
         run: |
-          GIT_REPO="${{ inputs.git_repo }}"
-          if [ -z "$GIT_REPO" ]; then
-            GIT_REPO="http://git.haproxy.org/git/haproxy-2.4.git"
-          fi
+          mkdir -p /tmp/rootfs
+          cd /tmp/rootfs
+          wget -O rootfs.tar "$TAR_URL"
+          tar xf rootfs.tar
+          mkdir mnt
+          sudo mount -o loop squashfs.tmp mnt
 
-          TARGET_OS_URL="${{ inputs.target_os_url }}"
-          if [ -z "$TARGET_OS_URL" ]; then
-            TARGET_OS_URL="https://dl.ui.com/firmwares/edgemax/3.0.1/ER-e300.v3.0.1.5862409.tar"
-          fi
-
-          echo "GIT_REPO=$GIT_REPO" >> $GITHUB_ENV
-          echo "TARGET_OS_URL=$TARGET_OS_URL" >> $GITHUB_ENV
-
-          echo "Using values:"
-          echo "GIT_REPO = $GIT_REPO"
-          echo "TARGET_OS_URL = $TARGET_OS_URL"
-
-      - name: Download target OS image
+      - name: Detect architecture and bits
+        id: arch
         run: |
-          echo "Downloading target OS image..."
-          curl -L -o target_os.tar "$TARGET_OS_URL"
-          tar -xf target_os.tar squashfs.tmp
-          echo "Firmware downloaded."
+          FILE_INFO=$(file -b /tmp/rootfs/mnt/bin/bash)
+          echo "FILE_INFO: $FILE_INFO"
+          ARCH=""
+          BITS=""
+          case "$FILE_INFO" in
+            *x86-64*)
+              ARCH=x86_64
+              BITS=64
+              QEMU_BIN=qemu-x86_64-static
+              ;;
+            *i386*|*Intel*)
+              ARCH=i386
+              BITS=32
+              QEMU_BIN=qemu-i386-static
+              ;;
+            *ARM*|*arm*)
+              ARCH=arm
+              BITS=32
+              QEMU_BIN=qemu-arm-static
+              ;;
+            *aarch64*)
+              ARCH=aarch64
+              BITS=64
+              QEMU_BIN=qemu-aarch64-static
+              ;;
+            *MIPS64*)
+              ARCH=mips64
+              BITS=64
+              QEMU_BIN=qemu-mips64-static
+              ;;
+            *MIPS*)
+              ARCH=mips
+              BITS=32
+              QEMU_BIN=qemu-mips-static
+              ;;
+            *)
+              echo "Unsupported architecture: $FILE_INFO"
+              exit 1
+              ;;
+          esac
+          echo "ARCH=$ARCH" >> $GITHUB_ENV
+          echo "BITS=$BITS" >> $GITHUB_ENV
+          echo "QEMU_BIN=$QEMU_BIN" >> $GITHUB_ENV
+          echo "RELEASE_NAME=haproxy-latest-${ARCH}-${BITS}-hybrid" >> $GITHUB_ENV
 
-      - name: Mount target OS root filesystem
+      - name: Copy QEMU for chroot
         run: |
-          mkdir -p "$RUNNER_TEMP/target_root"
-          echo "Mounting squashfs.tmp as loop device..."
-          sudo mount -o loop,ro squashfs.tmp "$RUNNER_TEMP/target_root"
-          echo "Target root filesystem available at $RUNNER_TEMP/target_root"
+          sudo cp /usr/bin/$QEMU_BIN /tmp/rootfs/mnt/usr/bin/
 
-      - name: Detect target architecture from /bin/bash
+      - name: Configure apt sources
         run: |
-          BASH_BIN="$RUNNER_TEMP/target_root/bin/bash"
-          if [ ! -f "$BASH_BIN" ]; then
-            echo "WARNING: /bin/bash not found, using defaults MIPS64/64-bit"
-            echo "ARCH=mips64" >> $GITHUB_ENV
-            echo "BITS=64" >> $GITHUB_ENV
-          else
-            FILE_OUTPUT=$(file "$BASH_BIN")
-            echo "file output: $FILE_OUTPUT"
-            ARCH=$(echo "$FILE_OUTPUT" | awk '{print $3}')
-            BITS=$(echo "$FILE_OUTPUT" | awk '{print $2}' | sed 's/ELF//')
-            echo "Detected ARCH=$ARCH"
-            echo "Detected BITS=$BITS"
-            echo "ARCH=$ARCH" >> $GITHUB_ENV
-            echo "BITS=$BITS" >> $GITHUB_ENV
-          fi
-
-      - name: Build HAProxy (hybrid linking)
-        run: |
-          # Determine compiler triplet based on ELF class
-          if [ "${BITS}" = "64" ]; then
-            TRIPLET=mips64-linux-gnuabi64
-            CFLAGS="-mabi=64"
-          else
-            TRIPLET=mips64-linux-gnuabin32
-            CFLAGS="-mabi=n32"
-          fi
-
-          # Hybrid linking: dynamic glibc, static PCRE/OpenSSL
-          LDFLAGS="$CFLAGS -static -lpcre -lssl"
-
-          export CC=$TRIPLET-gcc
-          export CXX=$TRIPLET-g++
-          export CFLAGS
-          export LDFLAGS
-
-          SYSROOT="$RUNNER_TEMP/target_root"
-          echo "Using sysroot: $SYSROOT"
-
-          git clone "$GIT_REPO" haproxy
-          cd haproxy
-
-          make -j$(nproc) \
-            TARGET=linux-glibc \
-            USE_ZLIB=1 \
-            USE_PCRE=1 \
-            USE_STATIC_PCRE=1 \
-            USE_OPENSSL=1 \
-            CC="$CC --sysroot=$SYSROOT" \
-            CFLAGS="$CFLAGS --sysroot=$SYSROOT" \
-            LDFLAGS="$LDFLAGS --sysroot=$SYSROOT" || { echo "Build failed"; exit 1; }
-
-          install -m 0755 haproxy ../haproxy-cross
-
-      - name: Rename binary
-        run: |
-          if [ ! -f ../haproxy-cross ]; then
-            echo "ERROR: haproxy-cross does not exist!"
-            exit 1
-          fi
-
-          OUTPUT=haproxy-latest-${ARCH}-${BITS}-hybrid
-          mv ../haproxy-cross "$OUTPUT"
-          echo "Built binary: $OUTPUT"
-
-      - name: Create GitHub release
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: latest
-          name: HAProxy latest (${ARCH} ${BITS}-bit hybrid)
-          body: Automated HAProxy hybrid cross-compile from $GIT_REPO
-          files: haproxy-latest-*
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Cleanup mounts
-        if: always()
-        run: |
-          sudo umount "$RUNNER_TEMP/target_root" || true
-          echo "Cleanup complete."
+          sudo chroot /tmp/rootfs/mnt /bin/bash -c "echo 'deb http://archive.debian.org/debian stretch main' > /etc/apt/sources.list"
+          sudo chroot /tmp/rootfs/mnt /bin/bash -c "apt-
