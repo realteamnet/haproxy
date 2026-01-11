@@ -55,19 +55,24 @@ jobs:
             binutils \
             libssl-dev
 
-      - name: Prepare rootfs
+      - name: Prepare rootfs with OverlayFS
         run: |
-          mkdir -p /tmp/rootfs
+          mkdir -p /tmp/rootfs/lower /tmp/rootfs/upper /tmp/rootfs/work /tmp/rootfs/merged
           cd /tmp/rootfs
           wget -O rootfs.tar "$TAR_URL"
           tar xf rootfs.tar
-          mkdir mnt
-          sudo mount -o loop squashfs.tmp mnt
+          # Move squashfs.tmp to lower layer
+          mv squashfs.tmp lower/squashfs.tmp
+          sudo mount -o loop /tmp/rootfs/lower/squashfs.tmp /tmp/rootfs/lower
+          # Mount overlay
+          sudo mount -t overlay overlay \
+            -o lowerdir=/tmp/rootfs/lower,upperdir=/tmp/rootfs/upper,workdir=/tmp/rootfs/work \
+            /tmp/rootfs/merged
 
       - name: Detect architecture and bits
         id: arch
         run: |
-          FILE_INFO=$(file -b /tmp/rootfs/mnt/bin/bash)
+          FILE_INFO=$(file -b /tmp/rootfs/merged/bin/bash)
           echo "FILE_INFO: $FILE_INFO"
           ARCH=""
           BITS=""
@@ -112,24 +117,23 @@ jobs:
           echo "QEMU_BIN=$QEMU_BIN" >> $GITHUB_ENV
           echo "RELEASE_NAME=haproxy-latest-${ARCH}-${BITS}-hybrid" >> $GITHUB_ENV
 
-      - name: Bind QEMU into chroot via /tmp/qemu-bin
+      - name: Bind QEMU into chroot
         run: |
-          sudo mkdir -p /tmp/rootfs/mnt/tmp/qemu-bin
-          sudo mount --bind /usr/bin/$QEMU_BIN /tmp/rootfs/mnt/tmp/qemu-bin/$QEMU_BIN
+          sudo mkdir -p /tmp/rootfs/merged/usr/bin
+          sudo mount --bind /usr/bin/$QEMU_BIN /tmp/rootfs/merged/usr/bin/$QEMU_BIN
 
       - name: Configure apt sources
         run: |
-          sudo chroot /tmp/rootfs/mnt /bin/bash -c "echo 'deb http://archive.debian.org/debian stretch main' > /etc/apt/sources.list"
-          sudo chroot /tmp/rootfs/mnt /bin/bash -c "apt-get update -o Acquire::Check-Valid-Until=false"
+          sudo chroot /tmp/rootfs/merged /bin/bash -c "echo 'deb http://archive.debian.org/debian stretch main' > /etc/apt/sources.list"
+          sudo chroot /tmp/rootfs/merged /bin/bash -c "apt-get update -o Acquire::Check-Valid-Until=false"
 
       - name: Install build tools in chroot
         run: |
-          sudo chroot /tmp/rootfs/mnt /bin/bash -c "apt-get install -y build-essential git wget curl cmake automake autoconf libssl-dev"
+          sudo chroot /tmp/rootfs/merged /bin/bash -c "apt-get install -y build-essential git wget curl cmake automake autoconf libssl-dev"
 
       - name: Clone and build HAProxy
         run: |
-          sudo chroot /tmp/rootfs/mnt /bin/bash -c "
-            export PATH=/tmp/qemu-bin:\$PATH
+          sudo chroot /tmp/rootfs/merged /bin/bash -c "
             cd /tmp
             git clone $GIT_REPO
             repo_name=\$(basename $GIT_REPO .git)
@@ -141,7 +145,8 @@ jobs:
 
       - name: Cleanup rootfs
         run: |
-          sudo umount /tmp/rootfs/mnt || true
+          sudo umount /tmp/rootfs/merged || true
+          sudo umount /tmp/rootfs/lower || true
 
       - name: Upload binaries as release
         uses: ncipollo/release-action@v1
