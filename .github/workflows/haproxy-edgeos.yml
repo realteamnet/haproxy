@@ -40,6 +40,7 @@ jobs:
           sudo apt-get install -y \
             qemu-user-static \
             squashfs-tools \
+            xz-utils \
             git \
             wget \
             curl \
@@ -54,17 +55,17 @@ jobs:
             binutils \
             libssl-dev
 
-
-      - name: Prepare rootfs by extracting squashfs
+      - name: Prepare rootfs by extracting SquashFS
         run: |
           mkdir -p /tmp/rootfs
           cd /tmp/rootfs
-          wget -O rootfs.tar "$TAR_URL"
+          # Download tar quietly
+          wget -qO rootfs.tar "$TAR_URL"
           tar xf rootfs.tar
-          # Extract squashfs.tmp fully (skip device nodes)
-          unsquashfs -d /tmp/rootfs/squashfs -no-dev squashfs.tmp
-          mv /tmp/rootfs/squashfs/* /tmp/rootfs/
-          rm -rf /tmp/rootfs/squashfs squashfs.tmp
+          # The SquashFS file is xz-compressed
+          # Extract squashfs.tmp fully, skip device nodes
+          unsquashfs -d /tmp/rootfs -no-dev squashfs.tmp
+          rm -rf squashfs.tmp
 
       - name: Detect architecture and bits
         id: arch
