@@ -112,11 +112,40 @@ jobs:
           echo "QEMU_BIN=$QEMU_BIN" >> $GITHUB_ENV
           echo "RELEASE_NAME=haproxy-latest-${ARCH}-${BITS}-hybrid" >> $GITHUB_ENV
 
-      - name: Copy QEMU for chroot
+      - name: Bind QEMU into chroot
         run: |
-          sudo cp /usr/bin/$QEMU_BIN /tmp/rootfs/mnt/usr/bin/
+          sudo mkdir -p /tmp/rootfs/mnt/usr/bin
+          sudo mount --bind /usr/bin/$QEMU_BIN /tmp/rootfs/mnt/usr/bin/$QEMU_BIN
 
       - name: Configure apt sources
         run: |
           sudo chroot /tmp/rootfs/mnt /bin/bash -c "echo 'deb http://archive.debian.org/debian stretch main' > /etc/apt/sources.list"
-          sudo chroot /tmp/rootfs/mnt /bin/bash -c "apt-
+          sudo chroot /tmp/rootfs/mnt /bin/bash -c "apt-get update -o Acquire::Check-Valid-Until=false"
+
+      - name: Install build tools in chroot
+        run: |
+          sudo chroot /tmp/rootfs/mnt /bin/bash -c "apt-get install -y build-essential git wget curl cmake automake autoconf libssl-dev"
+
+      - name: Clone and build HAProxy
+        run: |
+          sudo chroot /tmp/rootfs/mnt /bin/bash -c "
+            cd /tmp
+            git clone $GIT_REPO
+            repo_name=\$(basename $GIT_REPO .git)
+            cd \$repo_name
+            make CFLAGS='-O2' LDFLAGS='-Wl,-Bstatic -lpcre -lssl -lcrypto -Wl,-Bdynamic'
+            mkdir -p /tmp/output
+            cp -v *.so *.a haproxy /tmp/output/ || cp -v * /tmp/output/ || true
+          "
+
+      - name: Cleanup rootfs
+        run: |
+          sudo umount /tmp/rootfs/mnt || true
+
+      - name: Upload binaries as release
+        uses: ncipollo/release-action@v1
+        with:
+          tag: ${{ env.RELEASE_TAG }}
+          name: ${{ env.RELEASE_NAME }}
+          artifacts: /tmp/output/*
+          overwrite: true
