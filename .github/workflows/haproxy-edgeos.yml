@@ -39,8 +39,8 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y \
             qemu-user-static \
+            debootstrap \
             squashfs-tools \
-            xz-utils \
             git \
             wget \
             curl \
@@ -55,18 +55,24 @@ jobs:
             binutils \
             libssl-dev
 
-      - name: Prepare rootfs by extracting SquashFS
+      - name: Prepare rootfs with OverlayFS
         run: |
-          mkdir -p /tmp/rootfs
+          mkdir -p /tmp/rootfs/lower /tmp/rootfs/upper /tmp/rootfs/work /tmp/rootfs/merged
           cd /tmp/rootfs
           wget -qO rootfs.tar "$TAR_URL"
           tar xf rootfs.tar
-          unsquashfs -d /tmp/rootfs squashfs.tmp
-          rm -rf squashfs.tmp
+          # Move squashfs.tmp to lower layer
+          mv squashfs.tmp lower/squashfs.tmp
+          sudo mount -o loop /tmp/rootfs/lower/squashfs.tmp /tmp/rootfs/lower
+          # Mount overlay
+          sudo mount -t overlay overlay \
+            -o lowerdir=/tmp/rootfs/lower,upperdir=/tmp/rootfs/upper,workdir=/tmp/rootfs/work \
+            /tmp/rootfs/merged
+
       - name: Detect architecture and bits
         id: arch
         run: |
-          FILE_INFO=$(file -b /tmp/rootfs/bin/bash)
+          FILE_INFO=$(file -b /tmp/rootfs/merged/bin/bash)
           echo "FILE_INFO: $FILE_INFO"
           ARCH=""
           BITS=""
@@ -113,23 +119,23 @@ jobs:
 
       - name: Bind QEMU into chroot
         run: |
-          sudo mkdir -p /tmp/rootfs/usr/bin
-          sudo touch /tmp/rootfs/usr/bin/$QEMU_BIN
-          sudo mount --bind /usr/bin/$QEMU_BIN /tmp/rootfs/usr/bin/$QEMU_BIN
+          sudo mkdir -p /tmp/rootfs/merged/usr/bin
+          sudo touch /tmp/rootfs/merged/usr/bin/$QEMU_BIN
+          sudo mount --bind /usr/bin/$QEMU_BIN /tmp/rootfs/merged/usr/bin/$QEMU_BIN
 
       - name: Configure apt sources for Debian Stretch
         run: |
-          sudo chroot /tmp/rootfs /bin/bash -c "echo 'deb http://archive.debian.org/debian stretch main contrib non-free' > /etc/apt/sources.list"
-          sudo chroot /tmp/rootfs /bin/bash -c "echo 'Acquire::Check-Valid-Until \"false\";' > /etc/apt/apt.conf.d/99no-check-valid-until"
-          sudo chroot /tmp/rootfs /bin/bash -c "apt-get update -o Acquire::Check-Valid-Until=false"
+          sudo chroot /tmp/rootfs/merged /bin/bash -c "echo 'deb http://archive.debian.org/debian stretch main contrib non-free' > /etc/apt/sources.list"
+          sudo chroot /tmp/rootfs/merged /bin/bash -c "echo 'Acquire::Check-Valid-Until \"false\";' > /etc/apt/apt.conf.d/99no-check-valid-until"
+          sudo chroot /tmp/rootfs/merged /bin/bash -c "apt-get update -o Acquire::Check-Valid-Until=false"
 
       - name: Install build tools in chroot
         run: |
-          sudo chroot /tmp/rootfs /bin/bash -c "DEBIAN_FRONTEND=noninteractive apt-get install -y build-essential git wget curl cmake automake autoconf libssl-dev"
+          sudo chroot /tmp/rootfs/merged /bin/bash -c "DEBIAN_FRONTEND=noninteractive apt-get install -y build-essential git wget curl cmake automake autoconf libssl-dev"
 
       - name: Clone and build HAProxy
         run: |
-          sudo chroot /tmp/rootfs /bin/bash -c "
+          sudo chroot /tmp/rootfs/merged /bin/bash -c "
             cd /tmp
             git clone $GIT_REPO
             repo_name=\$(basename $GIT_REPO .git)
@@ -141,7 +147,8 @@ jobs:
 
       - name: Cleanup rootfs
         run: |
-          sudo umount /tmp/rootfs/usr/bin/$QEMU_BIN || true
+          sudo umount /tmp/rootfs/merged || true
+          sudo umount /tmp/rootfs/lower || true
 
       - name: Upload binaries as release
         uses: ncipollo/release-action@v1
