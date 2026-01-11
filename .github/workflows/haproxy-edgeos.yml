@@ -2,7 +2,6 @@ name: HAProxy 2.4 – MIPS64 Cross-Compile with Target OS Libraries (Bind Mount)
 
 on:
   push:
-    # Trigger only when this workflow YAML is updated
     paths:
       - .github/workflows/haproxy-edgeos.yml
   workflow_dispatch:
@@ -12,13 +11,6 @@ on:
         required: false
         default: "http://git.haproxy.org/git/haproxy-2.4.git"
         type: string
-
-      linking:
-        description: "Executable type"
-        required: false
-        default: "dynamic"
-        type: choice
-        options: [static, dynamic]
 
       target_os_url:
         description: "URL of the target OS image"
@@ -45,20 +37,14 @@ jobs:
           sudo apt-get install -y \
             build-essential git pkg-config libpcre3-dev zlib1g-dev \
             gcc-mips64-linux-gnuabi64 g++-mips64-linux-gnuabi64 \
-            squashfs-tools binutils curl
+            squashfs-tools binutils curl file
 
-      - name: Set input defaults for push/manual runs
+      - name: Set input defaults
         id: set_defaults
         run: |
-          # Fallbacks for push-triggered runs
           GIT_REPO="${{ inputs.git_repo }}"
           if [ -z "$GIT_REPO" ]; then
             GIT_REPO="http://git.haproxy.org/git/haproxy-2.4.git"
-          fi
-
-          LINKING="${{ inputs.linking }}"
-          if [ -z "$LINKING" ]; then
-            LINKING="dynamic"
           fi
 
           TARGET_OS_URL="${{ inputs.target_os_url }}"
@@ -67,72 +53,64 @@ jobs:
           fi
 
           echo "GIT_REPO=$GIT_REPO" >> $GITHUB_ENV
-          echo "LINKING=$LINKING" >> $GITHUB_ENV
           echo "TARGET_OS_URL=$TARGET_OS_URL" >> $GITHUB_ENV
 
           echo "Using values:"
           echo "GIT_REPO = $GIT_REPO"
-          echo "LINKING = $LINKING"
           echo "TARGET_OS_URL = $TARGET_OS_URL"
 
       - name: Download target OS image
         run: |
           echo "Downloading target OS image..."
           curl -L -o target_os.tar "$TARGET_OS_URL"
-          tar -xf target_os.tar vmlinux.tmp squashfs.tmp
+          tar -xf target_os.tar squashfs.tmp
           echo "Firmware downloaded."
 
-      - name: Detect target CPU, ABI, and bitness from kernel
-        id: detect
+      - name: Mount target OS root filesystem
         run: |
-          KERNEL=vmlinux.tmp
-          if [ ! -f $KERNEL ]; then
-            echo "Kernel file vmlinux.tmp not found, using defaults."
-            echo "arch=MIPS64" >> $GITHUB_ENV
-            echo "cpu_bits=64" >> $GITHUB_ENV
-            echo "abi=n32" >> $GITHUB_ENV
+          mkdir -p "$RUNNER_TEMP/target_root"
+          echo "Mounting squashfs.tmp as loop device..."
+          sudo mount -o loop,ro squashfs.tmp "$RUNNER_TEMP/target_root"
+          echo "Target root filesystem available at $RUNNER_TEMP/target_root"
+
+      - name: Detect target architecture from /bin/bash
+        run: |
+          BASH_BIN="$RUNNER_TEMP/target_root/bin/bash"
+          if [ ! -f "$BASH_BIN" ]; then
+            echo "WARNING: /bin/bash not found, using defaults MIPS64/64-bit"
+            echo "ARCH=mips64" >> $GITHUB_ENV
+            echo "BITS=64" >> $GITHUB_ENV
           else
-            ARCH=$(file $KERNEL | awk '{print $4}')
-            BITS=$(file $KERNEL | awk '{print $2}' | sed 's/ELF//')
-            ABI=$(readelf -h $KERNEL | grep Flags | awk '{print $2}')
+            FILE_OUTPUT=$(file "$BASH_BIN")
+            echo "file output: $FILE_OUTPUT"
+            ARCH=$(echo "$FILE_OUTPUT" | awk '{print $3}')
+            BITS=$(echo "$FILE_OUTPUT" | awk '{print $2}' | sed 's/ELF//')
             echo "Detected ARCH=$ARCH"
             echo "Detected BITS=$BITS"
-            echo "Detected ABI=$ABI"
-            echo "arch=$ARCH" >> $GITHUB_ENV
-            echo "cpu_bits=$BITS" >> $GITHUB_ENV
-            echo "abi=$ABI" >> $GITHUB_ENV
+            echo "ARCH=$ARCH" >> $GITHUB_ENV
+            echo "BITS=$BITS" >> $GITHUB_ENV
           fi
 
-      - name: Mount target OS root filesystem (bind mount)
+      - name: Build HAProxy (hybrid linking)
         run: |
-          mkdir -p /mnt/target_root /tmp/target_root
-          echo "Mounting squashfs.tmp as loop device..."
-          sudo mount -o loop,ro squashfs.tmp /mnt/target_root
-          sudo mount --bind /mnt/target_root /tmp/target_root
-          echo "Target root filesystem available at /tmp/target_root"
-
-      - name: Build HAProxy
-        run: |
-          # Determine cross-compiler triplet and CFLAGS based on ABI
-          if [ "${{ env.abi }}" = "n32" ]; then
-            TRIPLET=mips64-linux-gnuabin32
-            CFLAGS="-mabi=n32"
-          else
+          # Determine compiler triplet based on ELF class
+          if [ "${BITS}" = "64" ]; then
             TRIPLET=mips64-linux-gnuabi64
             CFLAGS="-mabi=64"
+          else
+            TRIPLET=mips64-linux-gnuabin32
+            CFLAGS="-mabi=n32"
           fi
 
-          LDFLAGS="$CFLAGS"
-          if [ "$LINKING" = "static" ]; then
-            LDFLAGS="$LDFLAGS -static"
-          fi
+          # Hybrid linking: dynamic glibc, static PCRE/OpenSSL
+          LDFLAGS="$CFLAGS -static -lpcre -lssl"
 
           export CC=$TRIPLET-gcc
           export CXX=$TRIPLET-g++
           export CFLAGS
           export LDFLAGS
 
-          SYSROOT=/tmp/target_root
+          SYSROOT="$RUNNER_TEMP/target_root"
           echo "Using sysroot: $SYSROOT"
 
           git clone "$GIT_REPO" haproxy
@@ -142,8 +120,8 @@ jobs:
             TARGET=linux-glibc \
             USE_ZLIB=1 \
             USE_PCRE=1 \
-            USE_STATIC_PCRE=$( [ "$LINKING" = "static" ] && echo 1 || echo 0 ) \
-            USE_OPENSSL=0 \
+            USE_STATIC_PCRE=1 \
+            USE_OPENSSL=1 \
             CC="$CC --sysroot=$SYSROOT" \
             CFLAGS="$CFLAGS --sysroot=$SYSROOT" \
             LDFLAGS="$LDFLAGS --sysroot=$SYSROOT" || { echo "Build failed"; exit 1; }
@@ -157,7 +135,7 @@ jobs:
             exit 1
           fi
 
-          OUTPUT=haproxy-latest-${{ env.arch }}-cpu${{ env.cpu_bits }}-${{ env.abi }}-${LINKING}
+          OUTPUT=haproxy-latest-${ARCH}-${BITS}-hybrid
           mv ../haproxy-cross "$OUTPUT"
           echo "Built binary: $OUTPUT"
 
@@ -165,8 +143,8 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           tag_name: latest
-          name: HAProxy latest (${{ env.arch }} ${{ env.cpu_bits }}-bit ${{ env.abi }})
-          body: Automated HAProxy cross-compile from $GIT_REPO
+          name: HAProxy latest (${ARCH} ${BITS}-bit hybrid)
+          body: Automated HAProxy hybrid cross-compile from $GIT_REPO
           files: haproxy-latest-*
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -174,6 +152,5 @@ jobs:
       - name: Cleanup mounts
         if: always()
         run: |
-          sudo umount /tmp/target_root || true
-          sudo umount /mnt/target_root || true
+          sudo umount "$RUNNER_TEMP/target_root" || true
           echo "Cleanup complete."
