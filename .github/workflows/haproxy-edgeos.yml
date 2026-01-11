@@ -1,4 +1,4 @@
-name: HAProxy 2.4 – MIPS64 (Chroot Distro / CPU / Userland / ABI)
+name: HAProxy 2.4 – MIPS64 (Cross-Compile in Debian Stretch Chroot)
 
 on:
   workflow_dispatch:
@@ -50,6 +50,10 @@ on:
         default: "stretch"
         type: string
 
+  push:
+    paths:
+      - ".github/workflows/haproxy-edgeos.yml"
+
 permissions:
   contents: write
 
@@ -58,6 +62,9 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
+      - name: Checkout
+        uses: actions/checkout@v3
+
       - name: Validate CPU / userland / ABI
         run: |
           if [ "${{ inputs.cpu_bits }}" != "64" ]; then
@@ -78,7 +85,7 @@ jobs:
       - name: Derive toolchain and flags
         id: vars
         run: |
-          if [ "${{ inputs.abi }}" = "n32" ]; then
+          if [ "${{ inputs.userland_bits }}" = "32" ] && [ "${{ inputs.abi }}" = "n32" ]; then
             echo "triplet=mips64-linux-gnuabin32" >> $GITHUB_OUTPUT
             echo "cflags=-mabi=n32" >> $GITHUB_OUTPUT
             echo "abi_suffix=n32" >> $GITHUB_OUTPUT
@@ -104,19 +111,16 @@ jobs:
           sudo apt-get install -y \
             git \
             debootstrap \
-            qemu-user-static \
-            binfmt-support \
-            gnupg
+            build-essential \
+            binutils \
+            pkg-config \
+            libpcre3-dev \
+            zlib1g-dev
 
-      - name: Enable QEMU
+      - name: Create native chroot (Debian Stretch)
         run: |
-          sudo update-binfmts --enable qemu-mips64 || true
-
-      - name: Create chroot (Debian Stretch archive)
-        run: |
-          # Use --no-check-gpg since Stretch is archived
           sudo debootstrap \
-            --arch=mips64 \
+            --arch=amd64 \
             --variant=minbase \
             --no-check-gpg \
             ${{ inputs.target_release }} \
@@ -130,33 +134,36 @@ jobs:
 
       - name: Prepare chroot
         run: |
-          sudo cp /usr/bin/qemu-mips64-static rootfs/usr/bin/
           sudo mount --bind /proc rootfs/proc
           sudo mount --bind /sys rootfs/sys
           sudo mount --bind /dev rootfs/dev
 
-      - name: Build HAProxy inside chroot
+      - name: Cross-compile HAProxy inside chroot
         run: |
           sudo chroot rootfs /bin/bash -eux << EOF
           export DEBIAN_FRONTEND=noninteractive
 
+          # Install cross-toolchain inside chroot
           apt-get update
-          apt-get install -y \
-            build-essential \
-            git \
-            ca-certificates \
-            pkg-config \
-            libpcre3-dev \
-            zlib1g-dev
+          apt-get install -y git build-essential pkg-config libpcre3-dev zlib1g-dev
 
-          apt-get install -y \
-            gcc-${{ steps.vars.outputs.triplet }} \
-            g++-${{ steps.vars.outputs.triplet }}
+          if [ "${{ inputs.abi }}" = "n32" ]; then
+            apt-get install -y gcc-mips64-linux-gnuabin32 g++-mips64-linux-gnuabin32
+            export CC=mips64-linux-gnuabin32-gcc
+            export CXX=mips64-linux-gnuabin32-g++
+            export CFLAGS="-mabi=n32"
+          else
+            apt-get install -y gcc-mips64-linux-gnuabi64 g++-mips64-linux-gnuabi64
+            export CC=mips64-linux-gnuabi64-gcc
+            export CXX=mips64-linux-gnuabi64-g++
+            export CFLAGS="-mabi=64"
+          fi
 
-          export CC=${{ steps.vars.outputs.triplet }}-gcc
-          export CXX=${{ steps.vars.outputs.triplet }}-g++
-          export CFLAGS="${{ steps.vars.outputs.cflags }}"
-          export LDFLAGS="${{ steps.vars.outputs.cflags }} ${{ steps.vars.outputs.ldflags }}"
+          if [ "${{ inputs.linking }}" = "static" ]; then
+            export LDFLAGS="-static"
+          else
+            export LDFLAGS=""
+          fi
 
           git clone ${{ inputs.git_repo }} haproxy
           cd haproxy
@@ -182,7 +189,7 @@ jobs:
           tag_name: latest
           name: HAProxy latest (MIPS64 ${{ inputs.target_distro }} ${{ inputs.target_release }})
           body: |
-            Automated HAProxy build from repository ${{ inputs.git_repo }}
+            Automated HAProxy cross-compile from repository ${{ inputs.git_repo }}
 
             CPU bitness:      ${{ inputs.cpu_bits }}-bit
             Userland bitness: ${{ inputs.userland_bits }}-bit
