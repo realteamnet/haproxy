@@ -122,8 +122,10 @@ jobs:
           sudo touch /tmp/rootfs/merged/usr/bin/$QEMU_BIN
           sudo mount --bind /usr/bin/$QEMU_BIN /tmp/rootfs/merged/usr/bin/$QEMU_BIN
 
-      - name: Configure apt sources for Debian Stretch
+      - name: Fix DNS and configure apt sources for Debian Stretch
         run: |
+          sudo mkdir -p /tmp/rootfs/merged/etc
+          sudo cp /etc/resolv.conf /tmp/rootfs/merged/etc/resolv.conf
           sudo chroot /tmp/rootfs/merged /bin/bash -c "echo 'deb http://archive.debian.org/debian stretch main contrib non-free' > /etc/apt/sources.list"
           sudo chroot /tmp/rootfs/merged /bin/bash -c "echo 'deb http://archive.debian.org/debian-security stretch/updates main contrib non-free' >> /etc/apt/sources.list"
           sudo chroot /tmp/rootfs/merged /bin/bash -c "echo 'Acquire::Check-Valid-Until \"false\";' > /etc/apt/apt.conf.d/99no-check-valid-until"
