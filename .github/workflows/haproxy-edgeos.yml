@@ -54,14 +54,15 @@ jobs:
             binutils \
             libssl-dev
 
+
       - name: Prepare rootfs by extracting squashfs
         run: |
           mkdir -p /tmp/rootfs
           cd /tmp/rootfs
           wget -O rootfs.tar "$TAR_URL"
           tar xf rootfs.tar
-          # Extract squashfs.tmp fully into writable rootfs
-          unsquashfs -d /tmp/rootfs/squashfs squashfs.tmp
+          # Extract squashfs.tmp fully (skip device nodes)
+          unsquashfs -d /tmp/rootfs/squashfs -no-dev squashfs.tmp
           mv /tmp/rootfs/squashfs/* /tmp/rootfs/
           rm -rf /tmp/rootfs/squashfs squashfs.tmp
 
