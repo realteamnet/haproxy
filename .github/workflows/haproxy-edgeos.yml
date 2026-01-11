@@ -114,11 +114,11 @@ jobs:
 
       - name: Create chroot (Debian Stretch archive)
         run: |
-          # Use unauthenticated packages since Stretch is archived
+          # Use --no-check-gpg since Stretch is archived
           sudo debootstrap \
             --arch=mips64 \
             --variant=minbase \
-            --allow-unauthenticated \
+            --no-check-gpg \
             ${{ inputs.target_release }} \
             rootfs \
             http://archive.debian.org/debian/
