@@ -59,14 +59,10 @@ jobs:
         run: |
           mkdir -p /tmp/rootfs
           cd /tmp/rootfs
-          # Download tar quietly
           wget -qO rootfs.tar "$TAR_URL"
           tar xf rootfs.tar
-          # The SquashFS file is xz-compressed
-          # Extract squashfs.tmp fully, skip device nodes
-          unsquashfs -d /tmp/rootfs -no-dev squashfs.tmp
+          unsquashfs -d /tmp/rootfs squashfs.tmp
           rm -rf squashfs.tmp
-
       - name: Detect architecture and bits
         id: arch
         run: |
